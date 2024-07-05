@@ -30,6 +30,7 @@ Under Background Modes, choose "Remote Notifications"
 What you have done here is added an iCloud container to sync with. This is where all of your data will go, currently into a private database for your user. We need remote notifications as this is how Apple notifies your app that something changed in the iCloud container so that your app syncs. A great deal of functionality built for you with just a couple of clicks.
 
 Update your `PersistenceController` to look like this:
+
 class PersistenceController {
 
     static let shared = PersistenceController()
@@ -101,8 +102,6 @@ class PersistenceController {
         
         // MARK: Cloudkit Schema Initialization
 #if DEBUG
-        // If you are creating or updating an iCloud Schema, uncomment this code. Do NOT Leave it live after creation.
-        // The .printSchema option prints the results to the console for debugging purposes.
 //        do {
 //            try container.initializeCloudKitSchema(options: [.printSchema])
 //        } catch {
@@ -115,6 +114,45 @@ class PersistenceController {
         let context = container.viewContext
         if context.hasChanges {
             context.undo()
+        }
+    }
+
+// MARK: - Migration
+//    Migrate the core data from app to shared app group
+//    https://menuplan.app/coding/2021/10/27/core-data-store-path-migration.html
+    static func migrateCoreDataIfNecessary() {
+        let oldStoreContainer = NSPersistentContainer(name: CDConstants.hotHorse)
+        guard let storeDescription = oldStoreContainer.persistentStoreDescriptions.first else {
+            // We can always create a new one
+            PersistenceController.logger.error("Failed to retrieve a persistent store description.")
+            return
+        }
+
+        // Verify if old file is there
+        guard let fromStoreURL = storeDescription.url,
+              FileManager.default.fileExists(atPath: fromStoreURL.path) else {
+            // No need to migrate sqlite
+            return
+        }
+
+        let persistence = PersistenceController()
+        let oldStoreURL = NSPersistentContainer.defaultDirectoryURL().appendingPathComponent(CDConstants.hotHorseSQLite)
+        let newStoreURL = AppGroup.group.containerURL.appendingPathComponent(CDConstants.hotHorseSQLite)
+        let coordinator = persistence.container.persistentStoreCoordinator
+
+        if coordinator.persistentStore(for: oldStoreURL) != nil {
+            do {
+                try coordinator.replacePersistentStore(
+                    at: newStoreURL,
+                    destinationOptions: nil,
+                    withPersistentStoreFrom: oldStoreURL,
+                    sourceOptions: nil,
+                    type: .sqlite
+                )
+                try coordinator.destroyPersistentStore(at: oldStoreURL, type: .sqlite)
+            } catch {
+                Self.logger.warning("migrateCoreData failed with error: \(error)")
+            }
         }
     }
 
@@ -147,8 +185,21 @@ class PersistenceController {
 }
 
 
+
 I want to point out this code:
         description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(
             containerIdentifier: CDConstants.hotHorseCK
         )
-The container 
+The containerIdentifier is the CloudKit Container in iCloud. You access it through developer.apple.com. The container name will start "iCloud." and then the container name. This throws a lot of people, and is very difficult to debug.
+
+Core Data Model Versioning:
+
+    At some point, no matter how well you have thought through your data model, you will need to change your database. You may get a great idea for an addition to your app, or you may realize that your well thought out model missed some things. It happens, and Apple has given us the necessary tools to handle it.
+    If you have not pushed your app to the store, you can change the model to your heart's content. You simply delete your app from the test device, and install the fresh model. Yes, you will delete any data that you had stored in Core Data, but that is why you are testing. Test, test and test again. Think about your model some more. If you know you want to add entities or attributes in the future, and you know exactly what they will be, add them now. If not, you can deal with them later. Once you have pushed to the App Store, things change. You now must consider versioning.
+    When you need to change your model after deployment, versioning becomes your friend. While it is not strictly necessary to version your Core Data model, versioning can save you a lot of grief down the road by making compatibility, and the need for migration clear.
+
+    DISCUSS TYPES OF MIGRATIONS
+    DISCUSS LIGHTWEIGHT MIGRATIONS
+
+Migrations with iCloud and CloudKit
+    As usual, Apple has some extra rules if you are using a CloudKit container. The first, and foremost rule: You cannot delete an attribute or entity. Once they are created, they exist in perpetuity; they are zombies that will break your syncing if you kill them. You can repurpose them if you are careful.
