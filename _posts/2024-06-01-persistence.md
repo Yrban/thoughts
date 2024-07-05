@@ -30,7 +30,7 @@ Under Background Modes, choose "Remote Notifications"
 What you have done here is added an iCloud container to sync with. This is where all of your data will go, currently into a private database for your user. We need remote notifications as this is how Apple notifies your app that something changed in the iCloud container so that your app syncs. A great deal of functionality built for you with just a couple of clicks.
 
 Update your `PersistenceController` to look like this:
-struct PersistenceController {
+class PersistenceController {
 
     static let shared = PersistenceController()
 
@@ -49,10 +49,10 @@ struct PersistenceController {
         user.expiresDate_ = date.addingTimeInterval(Constant.tenMinute)
     
         do {
-            try context.saveIfNeeded()
+            try context.save()
         } catch {
             let nsError = error as NSError
-            Self.logger.warning("Unresolved error \(nsError), \(nsError.userInfo)")
+            logger.warning("Unresolved error \(nsError), \(nsError.userInfo)")
         }
         return result
     }()
@@ -86,12 +86,13 @@ struct PersistenceController {
         if inMemory {
             container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
         }
-        container.loadPersistentStores(completionHandler: { (storeDescription, error) in
+        container.loadPersistentStores(completionHandler: { [self] (storeDescription, error) in
             if let error = error as? NSError {
                 PersistenceController.logger
                     .error(
                         "loadPersistentStores: error \(error), \(error.userInfo) for store \(storeDescription.description)"
                     )
+                handlePersistentStoreError(error)
             }
         })
     
@@ -100,6 +101,8 @@ struct PersistenceController {
         
         // MARK: Cloudkit Schema Initialization
 #if DEBUG
+        // If you are creating or updating an iCloud Schema, uncomment this code. Do NOT Leave it live after creation.
+        // The .printSchema option prints the results to the console for debugging purposes.
 //        do {
 //            try container.initializeCloudKitSchema(options: [.printSchema])
 //        } catch {
@@ -115,50 +118,34 @@ struct PersistenceController {
         }
     }
 
-// MARK: - Migration
-//    Migrate the core data from app to shared app group
-//    https://menuplan.app/coding/2021/10/27/core-data-store-path-migration.html
-    static func migrateCoreDataIfNecessary() {
-        let oldStoreContainer = NSPersistentContainer(name: CDConstants.hotHorse)
-        guard let storeDescription = oldStoreContainer.persistentStoreDescriptions.first else {
-            // We can always create a new one
-            PersistenceController.logger.error("Failed to retrieve a persistent store description.")
-            return
+    private func handlePersistentStoreError(_ error: NSError) {
+        let url = AppGroup.group.containerURL.appendingPathComponent(CDConstants.hotHorseSQLite)
+
+        do {
+            // Attempt to destroy the existing persistent store
+            try container.persistentStoreCoordinator.destroyPersistentStore(at: url, type: .sqlite, options: nil)
+            
+        } catch {
+            // If we fail to recreate the store, handle the error accordingly.
+            Self.logger.warning("PersistenceController handlePersistentStoreError: Failed to delete old store with error: \(error)")
         }
-
-        // Verify if old file is there
-        guard let fromStoreURL = storeDescription.url,
-              FileManager.default.fileExists(atPath: fromStoreURL.path) else {
-            // No need to migrate sqlite
-            return
-        }
-
-        let persistence = PersistenceController()
-        let oldStoreURL = NSPersistentContainer.defaultDirectoryURL().appendingPathComponent(CDConstants.hotHorseSQLite)
-        let newStoreURL = AppGroup.group.containerURL.appendingPathComponent(CDConstants.hotHorseSQLite)
-        let coordinator = persistence.container.persistentStoreCoordinator
-
-        if coordinator.persistentStore(for: oldStoreURL) != nil {
-            do {
-                try coordinator.replacePersistentStore(
-                    at: newStoreURL,
-                    destinationOptions: nil,
-                    withPersistentStoreFrom: oldStoreURL,
-                    sourceOptions: nil,
-                    type: .sqlite
-                )
-                try coordinator.destroyPersistentStore(at: oldStoreURL, type: .sqlite)
-            } catch {
-                Self.logger.warning("migrateCoreData failed with error: \(error)")
-            }
+        
+        do {
+            // Attempt to add a new persistent store
+            _ = try container.persistentStoreCoordinator.addPersistentStore(type: .sqlite, configuration: "Default", at: url, options: nil)
+            
+        } catch {
+            // If we fail to recreate the store, handle the error accordingly.
+            Self.logger.warning("PersistenceController handlePersistentStoreError: Failed to create new store with error: \(error)")
         }
     }
-
+    
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier!,
         category: String(describing: PersistenceController.self)
     )
 }
+
 
 I want to point out this code:
         description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(
